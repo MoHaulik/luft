@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Enhanced WebXR Breathing App</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <style>
+    body { 
+      margin: 0; 
+      overflow: hidden;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    #overlay {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      color: white;
+      z-index: 1;
+      text-shadow: 1px 1px 3px rgba(0,0,0,0.7);
+    }
+    #start-button {
+      padding: 12px 24px;
+      font-size: 18px;
+      background: rgba(72, 118, 255, 0.8);
+      color: white;
+      border: none;
+      border-radius: 30px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    #start-button:hover {
+      background: rgba(72, 118, 255, 1);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+    }
+    #status {
+      margin-top: 15px;
+      font-size: 20px;
+      background: rgba(0, 0, 0, 0.5);
+      padding: 10px 15px;
+      border-radius: 12px;
+      display: none;
+      backdrop-filter: blur(5px);
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+      line-height: 1.5;
+    }
+    #breath-indicator {
+      position: absolute;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 200px;
+      height: 40px;
+      background: rgba(0, 0, 0, 0.5);
+      border-radius: 20px;
+      overflow: hidden;
+      display: none;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    }
+    #breath-progress {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(to right, #4876FF, #36D1DC);
+      border-radius: 20px;
+      transition: width 0.1s linear;
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <button id="start-button">Start AR Experience</button>
+    <div id="status"></div>
+  </div>
+  <div id="breath-indicator">
+    <div id="breath-progress"></div>
+  </div>
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.150.1/build/three.module.js';
+    import { ARButton } from 'https://unpkg.com/three@0.150.1/examples/jsm/webxr/ARButton.js';
+
+    let camera, scene, renderer;
+    let analyser, dataArray;
+    let particles, particleMaterial;
+    let breathSphere, glowMaterial;
+    let clock = new THREE.Clock();
+    let basePositions = [];
+
+    // Breathing session variables
+    let phase = "breathing";
+    let phaseStartTime = 0;
+    const naturalBreathingDuration = 30 * 6;
+    const breathCycleDuration = 6;
+    const holdDuration = 60;
+    const recoveryDuration = 15;
+    let cycleCount = 0;
+    const maxCycles = 3;
+    
+    // Audio objects
+    let inhaleAudio, exhaleAudio, ambientAudio;
+    let lastBreathStage = null;
+
+    // Optimized particle system
+    const particleCount = 1500;  // Reduced for performance
+    const particleRadius = 5;
+    let particleSystem = {
+      hueRange: [190, 260],
+      baseSaturation: 0.7,
+      baseSize: 0.35,
+    };
+
+    init();
+
+    function init() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0x404040, 1.5);
+      scene.add(ambientLight);
+
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+      directionalLight.position.set(1, 1, 1);
+      directionalLight.castShadow = true;
+      scene.add(directionalLight);
+
+      // Start button event
+      document.getElementById('start-button').addEventListener('click', () => {
+        if (navigator.xr) {
+          navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+            if (supported) {
+              const sessionInit = { 
+                optionalFeatures: ['dom-overlay', 'light-estimation'], 
+                domOverlay: { root: document.body } 
+              };
+              navigator.xr.requestSession('immersive-ar', sessionInit).then(onSessionStarted);
+            } else {
+              alert('WebXR AR session is not supported on this device.');
+            }
+          });
+        } else {
+          alert('WebXR is not supported in this browser.');
+        }
+      });
+    }
+
+    function onSessionStarted(session) {
+      renderer.xr.setReferenceSpaceType('local');
+      renderer.xr.setSession(session);
+      document.getElementById('start-button').style.display = 'none';
+      document.getElementById('status').style.display = 'block';
+      document.getElementById('breath-indicator').style.display = 'block';
+
+      phase = "breathing";
+      phaseStartTime = clock.getElapsedTime();
+
+      // Audio setup
+      inhaleAudio = new Audio('inhale.mp3');
+      exhaleAudio = new Audio('exhale.mp3');
+      
+      ambientAudio = new Audio('https://soundbible.com/mp3/ocean-waves-daniel_simon.mp3');
+      ambientAudio.loop = true;
+      ambientAudio.volume = 0.3;
+      ambientAudio.play();
+
+      renderer.setAnimationLoop(render);
+
+      // Microphone setup
+      navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then((stream) => {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioContext.createMediaStreamSource(stream);
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        const bufferLength = analyser.frequencyBinCount;
+        dataArray = new Uint8Array(bufferLength);
+        source.connect(analyser);
+      });
+
+      createParticles();
+      createBreathingSphere();
+    }
+
+    function createBreathingSphere() {
+      // Core sphere
+      const geometry = new THREE.SphereGeometry(0.5, 32, 32);
+      const material = new THREE.MeshPhongMaterial({
+        color: 0x4876FF,
+        transparent: true,
+        opacity: 0.6,
+        shininess: 100
+      });
+      breathSphere = new THREE.Mesh(geometry, material);
+      breathSphere.position.set(0, 0, -3);
+      scene.add(breathSphere);
+      
+      // Glow effect
+      const glowGeometry = new THREE.SphereGeometry(0.55, 32, 32);
+      glowMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          "c": { type: "f", value: 0.5 },
+          "p": { type: "f", value: 3.0 },
+          glowColor: { type: "c", value: new THREE.Color(0x00a1ff) },
+          viewVector: { type: "v3", value: camera.position }
+        },
+        vertexShader: `
+          uniform vec3 viewVector;
+          uniform float c;
+          uniform float p;
+          varying float intensity;
+          void main() {
+            vec3 vNormal = normalize(normal);
+            vec3 vNormel = normalize(viewVector);
+            intensity = pow(c - dot(vNormal, vNormel), p);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 glowColor;
+          varying float intensity;
+          void main() {
+            vec3 glow = glowColor * intensity;
+            gl_FragColor = vec4(glow, 1.0);
+          }
+        `,
+        side: THREE.BackSide,
+        blending: THREE.AdditiveBlending,
+        transparent: true
+      });
+      
+      const glowMesh = new THREE.Mesh(glowGeometry, glowMaterial);
+      glowMesh.position.set(0, 0, -3);
+      scene.add(glowMesh);
+    }
+
+    function createParticles() {
+      const geometry = new THREE.BufferGeometry();
+      const positions = [];
+      const colors = [];
+      const sizes = [];
+      const alphas = [];
+      const turbulence = [];
+
+      for (let i = 0; i < particleCount; i++) {
+        // Create more interesting distribution
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        const radius = Math.pow(Math.random(), 0.7) * particleRadius;
+        
+        const x = radius * Math.sin(phi) * Math.cos(theta);
+        const y = radius * Math.sin(phi) * Math.sin(theta);
+        const z = radius * Math.cos(phi) * 0.7;
+        
+        positions.push(x, y, z);
+        basePositions.push(z);
+
+        // Enhanced color variations
+        let color = new THREE.Color();
+        const hue = particleSystem.hueRange[0] + Math.random() * (particleSystem.hueRange[1] - particleSystem.hueRange[0]);
+        const saturation = particleSystem.baseSaturation + Math.random() * 0.3;
+        const lightness = 0.5 + Math.random() * 0.5;
+        color.setHSL(hue / 360, saturation, lightness);
+        colors.push(color.r, color.g, color.b);
+
+        // Variable sizes
+        sizes.push(particleSystem.baseSize * (0.5 + Math.random()));
+        
+        // Alpha variation
+        alphas.push(0.2 + Math.random() * 0.8);
+        
+        // Turbulence factor for individual particle movement
+        turbulence.push(Math.random() * 2);
+      }
+
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geometry.setAttribute('customColor', new THREE.Float32BufferAttribute(colors, 3));
+      geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+      geometry.setAttribute('alpha', new THREE.Float32BufferAttribute(alphas, 1));
+      geometry.setAttribute('turbulence', new THREE.Float32BufferAttribute(turbulence, 1));
+
+      // Enhanced shader material
+      particleMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          pointTexture: { value: new THREE.TextureLoader().load('https://threejs.org/examples/textures/sprites/spark1.png') },
+          time: { value: 0 },
+          breathFactor: { value: 0 },
+          intensityFactor: { value: 0 },
+        },
+        vertexShader: `
+          attribute float size;
+          attribute vec3 customColor;
+          attribute float alpha;
+          attribute float turbulence;
+          varying vec3 vColor;
+          varying float vAlpha;
+          uniform float time;
+          uniform float breathFactor;
+          uniform float intensityFactor;
+          
+          void main() {
+            vColor = customColor;
+            
+            // Calculate position with multiple effects
+            vec3 pos = position;
+            
+            // Breath movement
+            pos.z += breathFactor * (1.0 - length(position.xy) / 5.0) * 0.8;
+            
+            // Individual particle turbulence
+            float turbAmt = turbulence * 0.3;
+            pos.x += sin(time * (0.5 + turbulence) + position.z * 2.0) * turbAmt;
+            pos.y += cos(time * (0.7 + turbulence) + position.x * 2.0) * turbAmt;
+            pos.z += sin(time * (0.9 + turbulence) + position.y * 2.0) * turbAmt * 0.5;
+            
+            // Audio reactivity
+            float distFromCenter = length(position.xy);
+            if (distFromCenter < 2.5) {
+              pos.z += intensityFactor * sin(time * 2.0 + distFromCenter * 3.0) * (2.5 - distFromCenter) * 0.1;
+            }
+            
+            // Alpha fade based on distance
+            vAlpha = alpha * (1.0 - length(position) / 5.0) * (0.6 + 0.4 * sin(time + turbulence * 10.0));
+            
+            // Size variation based on intensity
+            float dynamicSize = size * (1.0 + intensityFactor * turbulence);
+            
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            gl_PointSize = dynamicSize * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+          }
+        `,
+        fragmentShader: `
+          uniform sampler2D pointTexture;
+          varying vec3 vColor;
+          varying float vAlpha;
+          
+          void main() {
+            // Improved particle rendering with soft edges
+            vec4 texColor = texture2D(pointTexture, gl_PointCoord);
+            gl_FragColor = vec4(vColor, vAlpha * texColor.a);
+            if (gl_FragColor.a < 0.05) discard;
+          }
+        `,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+
+      particles = new THREE.Points(geometry, particleMaterial);
+      particles.position.set(0, 0, -3); // Position in front of the user
+      scene.add(particles);
+    }
+
+    function updateParticles(breathOffset, intensity) {
+      // Update shader uniforms instead of manipulating geometry
+      particleMaterial.uniforms.time.value = clock.getElapsedTime();
+      particleMaterial.uniforms.breathFactor.value = breathOffset;
+      particleMaterial.uniforms.intensityFactor.value = intensity;
+    }
+
+    function render() {
+      const delta = clock.getDelta();
+      const currentTime = clock.getElapsedTime();
+      let intensity = 0;
+      
+      // Process mic input
+      if (analyser) {
+        analyser.getByteFrequencyData(dataArray);
+        const avgFrequency = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+        intensity = avgFrequency / 255;
+      }
+
+      // Phase management
+      let statusText = "";
+      let breathOffset = 0;
+      let breathProgress = 0;
+      
+      if (phase === "breathing") {
+        const elapsed = currentTime - phaseStartTime;
+        if (elapsed >= naturalBreathingDuration) {
+          phase = "hold";
+          phaseStartTime = currentTime;
+        } else {
+          breathProgress = (elapsed % breathCycleDuration) / breathCycleDuration;
+          const currentBreathStage = (breathProgress < 0.5) ? "inhale" : "exhale";
+          
+          if (currentBreathStage !== lastBreathStage) {
+            lastBreathStage = currentBreathStage;
+            if (currentBreathStage === "inhale") {
+              inhaleAudio.play();
+            } else {
+              exhaleAudio.play();
+            }
+          }
+          
+          breathOffset = (0.7 + intensity * 0.3) * Math.sin(2 * Math.PI * (breathProgress - 0.25));
+          updateParticles(breathOffset, intensity);
+          
+          // Update breath sphere
+          const sphereScale = 0.5 + 0.3 * (1 + breathOffset);
+          breathSphere.scale.set(sphereScale, sphereScale, sphereScale);
+          
+          // Update glow color
+          if (currentBreathStage === "inhale") {
+            glowMaterial.uniforms.glowColor.value.setHex(0x00a1ff);
+          } else {
+            glowMaterial.uniforms.glowColor.value.setHex(0x4876ff);
+          }
+          
+          const minutesRemaining = Math.floor((naturalBreathingDuration - elapsed) / 60);
+          const secondsRemaining = Math.floor((naturalBreathingDuration - elapsed) % 60);
+          statusText = `Phase: Natural Breathing<br>Remaining: ${minutesRemaining}:${secondsRemaining < 10 ? '0' : ''}${secondsRemaining}`;
+        }
+      } else if (phase === "hold") {
+        const elapsed = currentTime - phaseStartTime;
+        if (elapsed >= holdDuration) {
+          phase = "recovery";
+          phaseStartTime = currentTime;
+        }
+        
+        breathOffset = (0.2 + intensity * 0.1) * Math.sin(2 * Math.PI * (elapsed / 60));
+        updateParticles(breathOffset, intensity * 0.5);
+        
+        // Update breath sphere
+        const holdPulse = 0.2 + 0.05 * Math.sin(elapsed * 0.5);
+        breathSphere.scale.set(holdPulse, holdPulse, holdPulse);
+        
+        glowMaterial.uniforms.glowColor.value.setHex(0x8a2be2);
+        
+        breathProgress = elapsed / holdDuration;
+        
+        const holdSecondsRemaining = Math.floor(holdDuration - elapsed);
+        statusText = `Phase: Breath Hold<br>Remaining: ${holdSecondsRemaining}s`;
+      } else if (phase === "recovery") {
+        const elapsed = currentTime - phaseStartTime;
+        if (elapsed >= recoveryDuration) {
+          cycleCount++;
+          if (cycleCount < maxCycles) {
+            phase = "breathing";
+            phaseStartTime = currentTime;
+          } else {
+            renderer.setAnimationLoop(null);
+            document.getElementById('status').innerHTML = "Session Finished!<br>Thank you for participating.";
+            document.getElementById('breath-indicator').style.display = 'none';
+            
+            // Fade out audio
+            const fadeOut = setInterval(() => {
+              if (ambientAudio.volume > 0.05) {
+                ambientAudio.volume -= 0.05;
+              } else {
+                ambientAudio.pause();
+                clearInterval(fadeOut);
+              }
+            }, 200);
+            
+            return;
+          }
+        }
+        
+        const recoveryProgress = elapsed / recoveryDuration;
+        breathOffset = (0.6 + intensity * 0.4) * ((1 - recoveryProgress) - recoveryProgress);
+        updateParticles(breathOffset, intensity * 1.5);
+        
+        // Update breath sphere
+        const recoveryScale = 0.3 + 0.5 * recoveryProgress;
+        breathSphere.scale.set(recoveryScale, recoveryScale, recoveryScale);
+        
+        glowMaterial.uniforms.glowColor.value.setHex(0x00ffaa);
+        
+        breathProgress = recoveryProgress;
+        
+        statusText = `Phase: Recovery Breath<br>Take a deep breath...`;
+      }
+      
+      // Update progress bar and status display
+      document.getElementById('breath-progress').style.width = `${breathProgress * 100}%`;
+      document.getElementById('status').innerHTML = `Cycle: ${cycleCount + 1}/${maxCycles}<br>${statusText}`;
+
+      // Add fluid motion to particle system
+      particles.rotation.z += 0.01 * delta;
+      particles.rotation.y += 0.005 * delta;
+      
+      // Update glow effect
+      if (glowMaterial) {
+        glowMaterial.uniforms.viewVector.value = new THREE.Vector3().subVectors(camera.position, breathSphere.position);
+      }
+
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
