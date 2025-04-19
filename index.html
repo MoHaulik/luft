@@ -87,6 +87,7 @@
     let breathSphere, glowMaterial;
     let clock = new THREE.Clock();
     let basePositions = [];
+    let lastIntensity = 0; // Store the last intensity value for smoother transitions
 
     // Breathing session variables
     let phase = "breathing";
@@ -103,12 +104,12 @@
     let lastBreathStage = null;
 
     // Optimized particle system
-    const particleCount = 1500;  // Reduced for performance
+    const particleCount = 1500;  // Good balance of performance and visuals
     const particleRadius = 5;
     let particleSystem = {
       hueRange: [190, 260],
       baseSaturation: 0.7,
-      baseSize: 0.35,
+      baseSize: 0.3, // Slightly smaller base size to make intensity changes more noticeable
     };
 
     init();
@@ -175,12 +176,13 @@
 
       renderer.setAnimationLoop(render);
 
-      // Microphone setup
+      // Microphone setup with increased sensitivity
       navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then((stream) => {
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const source = audioContext.createMediaStreamSource(stream);
         analyser = audioContext.createAnalyser();
         analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.6; // Make the audio analysis smoother
         const bufferLength = analyser.frequencyBinCount;
         dataArray = new Uint8Array(bufferLength);
         source.connect(analyser);
@@ -249,6 +251,7 @@
       const sizes = [];
       const alphas = [];
       const turbulence = [];
+      const sizeMultipliers = []; // New array for per-particle size multipliers
 
       for (let i = 0; i < particleCount; i++) {
         // Create more interesting distribution
@@ -271,8 +274,11 @@
         color.setHSL(hue / 360, saturation, lightness);
         colors.push(color.r, color.g, color.b);
 
-        // Variable sizes
+        // Base size
         sizes.push(particleSystem.baseSize * (0.5 + Math.random()));
+        
+        // Size multiplier - will be used to amplify size based on audio intensity
+        sizeMultipliers.push(0.8 + Math.random() * 1.5);
         
         // Alpha variation
         alphas.push(0.2 + Math.random() * 0.8);
@@ -286,8 +292,9 @@
       geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
       geometry.setAttribute('alpha', new THREE.Float32BufferAttribute(alphas, 1));
       geometry.setAttribute('turbulence', new THREE.Float32BufferAttribute(turbulence, 1));
+      geometry.setAttribute('sizeMultiplier', new THREE.Float32BufferAttribute(sizeMultipliers, 1));
 
-      // Enhanced shader material
+      // Enhanced shader material with stronger audio reactivity
       particleMaterial = new THREE.ShaderMaterial({
         uniforms: {
           pointTexture: { value: new THREE.TextureLoader().load('https://threejs.org/examples/textures/sprites/spark1.png') },
@@ -300,6 +307,7 @@
           attribute vec3 customColor;
           attribute float alpha;
           attribute float turbulence;
+          attribute float sizeMultiplier;
           varying vec3 vColor;
           varying float vAlpha;
           uniform float time;
@@ -312,8 +320,15 @@
             // Calculate position with multiple effects
             vec3 pos = position;
             
-            // Breath movement
-            pos.z += breathFactor * (1.0 - length(position.xy) / 5.0) * 0.8;
+            // Enhanced breath movement - stronger effect based on position
+            float distFromCenter = length(position.xy);
+            float breathEffect = breathFactor * (1.0 - distFromCenter / 5.0) * 1.5;
+            pos.z += breathEffect;
+            
+            // Add some radial movement based on breath
+            float radialFactor = breathFactor * 0.2;
+            pos.x += position.x * radialFactor;
+            pos.y += position.y * radialFactor;
             
             // Individual particle turbulence
             float turbAmt = turbulence * 0.3;
@@ -321,17 +336,17 @@
             pos.y += cos(time * (0.7 + turbulence) + position.x * 2.0) * turbAmt;
             pos.z += sin(time * (0.9 + turbulence) + position.y * 2.0) * turbAmt * 0.5;
             
-            // Audio reactivity
-            float distFromCenter = length(position.xy);
-            if (distFromCenter < 2.5) {
-              pos.z += intensityFactor * sin(time * 2.0 + distFromCenter * 3.0) * (2.5 - distFromCenter) * 0.1;
+            // Audio reactivity - much stronger effect on z-position
+            if (distFromCenter < 3.0) {
+              pos.z += intensityFactor * sin(time * 2.0 + distFromCenter * 3.0) * (3.0 - distFromCenter) * 0.3;
             }
             
-            // Alpha fade based on distance
-            vAlpha = alpha * (1.0 - length(position) / 5.0) * (0.6 + 0.4 * sin(time + turbulence * 10.0));
+            // Alpha fade based on distance and intensity
+            vAlpha = alpha * (1.0 - length(position) / 5.0) * (0.6 + 0.4 * intensityFactor);
             
-            // Size variation based on intensity
-            float dynamicSize = size * (1.0 + intensityFactor * turbulence);
+            // Enhanced size variation based on intensity - much more responsive
+            float sizeBoost = 1.0 + intensityFactor * 3.0 * sizeMultiplier;
+            float dynamicSize = size * sizeBoost;
             
             vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
             gl_PointSize = dynamicSize * (300.0 / -mvPosition.z);
@@ -344,7 +359,7 @@
           varying float vAlpha;
           
           void main() {
-            // Improved particle rendering with soft edges
+            // Enhanced particle rendering with improved glow
             vec4 texColor = texture2D(pointTexture, gl_PointCoord);
             gl_FragColor = vec4(vColor, vAlpha * texColor.a);
             if (gl_FragColor.a < 0.05) discard;
@@ -361,10 +376,13 @@
     }
 
     function updateParticles(breathOffset, intensity) {
-      // Update shader uniforms instead of manipulating geometry
+      // Smooth intensity changes
+      lastIntensity = lastIntensity * 0.7 + intensity * 0.3;
+      
+      // Update shader uniforms with enhanced values
       particleMaterial.uniforms.time.value = clock.getElapsedTime();
       particleMaterial.uniforms.breathFactor.value = breathOffset;
-      particleMaterial.uniforms.intensityFactor.value = intensity;
+      particleMaterial.uniforms.intensityFactor.value = lastIntensity;
     }
 
     function render() {
@@ -372,11 +390,22 @@
       const currentTime = clock.getElapsedTime();
       let intensity = 0;
       
-      // Process mic input
+      // Process mic input with enhanced sensitivity
       if (analyser) {
         analyser.getByteFrequencyData(dataArray);
-        const avgFrequency = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-        intensity = avgFrequency / 255;
+        // Focus on relevant frequency ranges and amplify the effect
+        let relevantFreqs = 0;
+        let totalRelevant = 0;
+        
+        // Focus more on frequencies that correspond to voice/breath
+        for (let i = 2; i < 20; i++) {
+          relevantFreqs += dataArray[i] * 1.5;
+          totalRelevant++;
+        }
+        
+        intensity = Math.min(1.0, (relevantFreqs / totalRelevant) / 128);
+        // Apply non-linear scaling to make small sounds more visible
+        intensity = Math.pow(intensity, 0.7);
       }
 
       // Phase management
@@ -402,14 +431,15 @@
             }
           }
           
-          breathOffset = (0.7 + intensity * 0.3) * Math.sin(2 * Math.PI * (breathProgress - 0.25));
+          // Enhanced breathing pattern with stronger effect
+          breathOffset = (0.7 + intensity * 0.5) * Math.sin(2 * Math.PI * (breathProgress - 0.25));
           updateParticles(breathOffset, intensity);
           
-          // Update breath sphere
-          const sphereScale = 0.5 + 0.3 * (1 + breathOffset);
+          // Update breath sphere with stronger effect
+          const sphereScale = 0.5 + 0.4 * (1 + breathOffset);
           breathSphere.scale.set(sphereScale, sphereScale, sphereScale);
           
-          // Update glow color
+          // Update glow color with intensity variation
           if (currentBreathStage === "inhale") {
             glowMaterial.uniforms.glowColor.value.setHex(0x00a1ff);
           } else {
@@ -427,11 +457,12 @@
           phaseStartTime = currentTime;
         }
         
-        breathOffset = (0.2 + intensity * 0.1) * Math.sin(2 * Math.PI * (elapsed / 60));
-        updateParticles(breathOffset, intensity * 0.5);
+        // More subtle movement during hold, but still responsive to mic
+        breathOffset = (0.2 + intensity * 0.2) * Math.sin(2 * Math.PI * (elapsed / 60));
+        updateParticles(breathOffset, intensity * 0.8);
         
         // Update breath sphere
-        const holdPulse = 0.2 + 0.05 * Math.sin(elapsed * 0.5);
+        const holdPulse = 0.2 + 0.05 * Math.sin(elapsed * 0.5) + intensity * 0.1;
         breathSphere.scale.set(holdPulse, holdPulse, holdPulse);
         
         glowMaterial.uniforms.glowColor.value.setHex(0x8a2be2);
@@ -467,11 +498,12 @@
         }
         
         const recoveryProgress = elapsed / recoveryDuration;
-        breathOffset = (0.6 + intensity * 0.4) * ((1 - recoveryProgress) - recoveryProgress);
-        updateParticles(breathOffset, intensity * 1.5);
+        breathOffset = (0.6 + intensity * 0.6) * ((1 - recoveryProgress) - recoveryProgress);
+        // Very responsive to mic during recovery
+        updateParticles(breathOffset, intensity * 2.0);
         
         // Update breath sphere
-        const recoveryScale = 0.3 + 0.5 * recoveryProgress;
+        const recoveryScale = 0.3 + 0.5 * recoveryProgress + intensity * 0.2;
         breathSphere.scale.set(recoveryScale, recoveryScale, recoveryScale);
         
         glowMaterial.uniforms.glowColor.value.setHex(0x00ffaa);
